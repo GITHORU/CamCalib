@@ -166,6 +166,15 @@ def export_micmac(results, output_path):
     cx = camera_matrix[0][2]
     cy = camera_matrix[1][2]
     
+    # Lire distortion_center si disponible (PP ≠ CDist), sinon utiliser PP
+    if 'distortion_center' in results:
+        cx_dist = results['distortion_center'][0]
+        cy_dist = results['distortion_center'][1]
+    else:
+        # Fallback sur PP pour compatibilité avec anciennes calibrations
+        cx_dist = cx
+        cy_dist = cy
+    
     # Conversion OpenCV → MicMac (normalisation par la focale)
     # ModPhgrStd utilise R3, R5, R7 (coefficients radiaux) + P1, P2 (tangentiels)
     r3 = dist_coeffs[0] / (fx * fx)  # k1 / f²
@@ -190,7 +199,7 @@ def export_micmac(results, output_path):
     mod_phgr = ET.SubElement(calib_dist, "ModPhgrStd")
     
     radiale_part = ET.SubElement(mod_phgr, "RadialePart")
-    ET.SubElement(radiale_part, "CDist").text = f"{cx} {cy}"  # PP = CDist
+    ET.SubElement(radiale_part, "CDist").text = f"{cx_dist} {cy_dist}"  # Utilise CDist si PP ≠ CDist
     ET.SubElement(radiale_part, "CoeffDist").text = f"{r3:.10e}"
     ET.SubElement(radiale_part, "CoeffDist").text = f"{r5:.10e}"
     ET.SubElement(radiale_part, "CoeffDist").text = f"{r7:.10e}"
