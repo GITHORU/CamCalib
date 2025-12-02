@@ -60,7 +60,18 @@ def calibrate_camera(images_folder, square_size_cm, squares_x=11, squares_y=8, m
     if not image_files:
         raise ValueError(f"Aucune image trouvée dans {images_folder}")
     
-    print(f"Images trouvées: {len(image_files)}")
+    # Dédupliquer les images (par chemin absolu pour éviter les doublons)
+    seen_paths = set()
+    unique_image_files = []
+    for img_path in image_files:
+        abs_path = img_path.resolve()  # Chemin absolu normalisé
+        if abs_path not in seen_paths:
+            seen_paths.add(abs_path)
+            unique_image_files.append(img_path)
+    
+    image_files = unique_image_files
+    
+    print(f"Images trouvées: {len(image_files)} (après déduplication)")
     
     # Détecter les coins dans toutes les images
     all_corners = []
@@ -110,6 +121,20 @@ def calibrate_camera(images_folder, square_size_cm, squares_x=11, squares_y=8, m
     print(f"  Tangentiels: p1={dist_coeffs[0][2]:.6f}, p2={dist_coeffs[0][3]:.6f}")
     
     # Préparer les résultats
+    # Sauvegarder les coins détectés pour éviter de les recalculer
+    saved_corners = []
+    saved_ids = []
+    for corners, ids in zip(all_corners, all_ids):
+        # Convertir en listes pour JSON
+        if corners is not None:
+            saved_corners.append(corners.tolist())
+        else:
+            saved_corners.append(None)
+        if ids is not None:
+            saved_ids.append(ids.tolist())
+        else:
+            saved_ids.append(None)
+    
     results = {
         'camera_matrix': camera_matrix.tolist(),
         'distortion_coefficients': dist_coeffs.tolist(),
@@ -118,14 +143,19 @@ def calibrate_camera(images_folder, square_size_cm, squares_x=11, squares_y=8, m
         'principal_point': [float(cx), float(cy)],
         'reprojection_error': float(retval),
         'valid_images': len(valid_images),
-        'total_images': len(image_files)
+        'total_images': len(image_files),
+        'rvecs': [rvec.tolist() for rvec in rvecs],
+        'tvecs': [tvec.tolist() for tvec in tvecs],
+        'valid_image_paths': valid_images,
+        'detected_corners': saved_corners,  # Coins détectés sauvegardés
+        'detected_ids': saved_ids  # IDs des coins sauvegardés
     }
     
     return results
 
 
 def export_micmac(results, output_path):
-    """Exporte au format MicMac (ModRad - modèle radial)"""
+    """Exporte au format MicMac (ModPhgrStd - Fraser avec coefficients tangentiels)"""
     camera_matrix = results['camera_matrix']
     dist_coeffs = results['distortion_coefficients'][0]
     image_size = results['image_size']
@@ -136,10 +166,14 @@ def export_micmac(results, output_path):
     cy = camera_matrix[1][2]
     
     # Conversion OpenCV → MicMac (normalisation par la focale)
-    # ModRad utilise R3, R5, R7 (coefficients radiaux)
+    # ModPhgrStd utilise R3, R5, R7 (coefficients radiaux) + P1, P2 (tangentiels)
     r3 = dist_coeffs[0] / (fx * fx)  # k1 / f²
     r5 = dist_coeffs[1] / (fx * fx * fx * fx)  # k2 / f⁴
     r7 = dist_coeffs[4] / (fx * fx * fx * fx * fx * fx) if len(dist_coeffs) > 4 else 0.0  # k3 / f⁶
+    
+    # Coefficients tangentiels
+    p1 = dist_coeffs[2] / fx if len(dist_coeffs) > 2 else 0.0  # p1 / f
+    p2 = dist_coeffs[3] / fx if len(dist_coeffs) > 3 else 0.0  # p2 / f
     
     # Création du XML MicMac
     root = ET.Element("ExportAPERO")
@@ -150,15 +184,23 @@ def export_micmac(results, output_path):
     ET.SubElement(calib, "F").text = str(fx)
     ET.SubElement(calib, "SzIm").text = f"{image_size[0]} {image_size[1]}"
     
-    # Distorsion radiale (ModRad)
+    # Distorsion Fraser (ModPhgrStd)
     calib_dist = ET.SubElement(calib, "CalibDistortion")
-    mod_rad = ET.SubElement(calib_dist, "ModRad")
+    mod_phgr = ET.SubElement(calib_dist, "ModPhgrStd")
     
-    radiale_part = ET.SubElement(mod_rad, "RadialePart")
+    radiale_part = ET.SubElement(mod_phgr, "RadialePart")
     ET.SubElement(radiale_part, "CDist").text = f"{cx} {cy}"  # PP = CDist
     ET.SubElement(radiale_part, "CoeffDist").text = f"{r3:.10e}"
     ET.SubElement(radiale_part, "CoeffDist").text = f"{r5:.10e}"
     ET.SubElement(radiale_part, "CoeffDist").text = f"{r7:.10e}"
+    
+    # Coefficients tangentiels
+    ET.SubElement(mod_phgr, "P1").text = f"{p1:.10e}"
+    ET.SubElement(mod_phgr, "P2").text = f"{p2:.10e}"
+    
+    # Coefficients affines (zéro par défaut)
+    ET.SubElement(mod_phgr, "b1").text = "0.0"
+    ET.SubElement(mod_phgr, "b2").text = "0.0"
     
     # Sauvegarde
     tree = ET.ElementTree(root)
