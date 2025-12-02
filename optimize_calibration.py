@@ -276,6 +276,20 @@ def optimize_calibration(calibration_json, images_folder, square_size_cm,
     
     # Définir les bornes pour l'optimisation
     print("\n5. Définition des bornes...")
+    
+    # Calculer les bornes pour les poses en fonction des valeurs initiales
+    # pour s'assurer qu'elles incluent les valeurs initiales
+    if tvecs and len(tvecs) > 0:
+        tvec_min = min([np.min(tvec) for tvec in tvecs])
+        tvec_max = max([np.max(tvec) for tvec in tvecs])
+        # Ajouter une marge de sécurité (50% de chaque côté)
+        tvec_range = max(abs(tvec_min), abs(tvec_max)) * 1.5
+        tvec_bounds = [-tvec_range, tvec_range]
+        print(f"  Bornes translations calculées: [{tvec_bounds[0]:.2f}, {tvec_bounds[1]:.2f}]")
+    else:
+        tvec_bounds = [-100, 100]  # Bornes très larges par défaut
+        print(f"  Bornes translations par défaut: [{tvec_bounds[0]}, {tvec_bounds[1]}]")
+    
     # Bornes pour les paramètres intrinsèques (larges pour permettre l'optimisation)
     bounds_lower = [
         fx_init * 0.3, fy_init * 0.3,  # Focales: 30% à 300%
@@ -293,12 +307,109 @@ def optimize_calibration(calibration_json, images_folder, square_size_cm,
         1.0, 1.0
     ]
     
-    # Bornes pour les poses (très larges)
+    # Bornes pour les poses (ajustées dynamiquement)
     for _ in range(n_images):
-        bounds_lower.extend([-np.pi, -np.pi, -np.pi, -10, -10, -10])
-        bounds_upper.extend([np.pi, np.pi, np.pi, 10, 10, 10])
+        bounds_lower.extend([-np.pi, -np.pi, -np.pi, tvec_bounds[0], tvec_bounds[0], tvec_bounds[0]])
+        bounds_upper.extend([np.pi, np.pi, np.pi, tvec_bounds[1], tvec_bounds[1], tvec_bounds[1]])
     
     bounds = (bounds_lower, bounds_upper)
+    
+    # Vérifier que toutes les valeurs initiales sont dans les bornes
+    print(f"  Vérification des bornes...")
+    bounds_adjusted = False
+    
+    # Vérifier les paramètres intrinsèques
+    params_check = params_init[:11]
+    for i, (val, lower, upper) in enumerate(zip(params_check, bounds_lower[:11], bounds_upper[:11])):
+        if val < lower or val > upper:
+            print(f"  ⚠️  Paramètre intrinsèque {i} hors bornes: {val:.4f} (bornes: [{lower:.4f}, {upper:.4f}])")
+            bounds_adjusted = True
+            # Ajuster les bornes si nécessaire
+            if val < lower:
+                bounds_lower[i] = val * 0.9
+            if val > upper:
+                bounds_upper[i] = val * 1.1
+    
+    # Vérifier les poses
+    for i, (rvec, tvec) in enumerate(zip(rvecs, tvecs)):
+        pose_idx = 11 + i * 6
+        rvec_flat = rvec.flatten()
+        tvec_flat = tvec.flatten()
+        
+        # Vérifier les rotations
+        if np.any(rvec_flat < bounds_lower[pose_idx:pose_idx+3]) or \
+           np.any(rvec_flat > bounds_upper[pose_idx:pose_idx+3]):
+            print(f"  ⚠️  Image {i}: rotations hors bornes")
+            bounds_adjusted = True
+            for j in range(3):
+                if rvec_flat[j] < bounds_lower[pose_idx+j]:
+                    bounds_lower[pose_idx+j] = rvec_flat[j] * 1.1
+                if rvec_flat[j] > bounds_upper[pose_idx+j]:
+                    bounds_upper[pose_idx+j] = rvec_flat[j] * 1.1
+        
+        # Vérifier les translations
+        if np.any(tvec_flat < bounds_lower[pose_idx+3:pose_idx+6]) or \
+           np.any(tvec_flat > bounds_upper[pose_idx+3:pose_idx+6]):
+            print(f"  ⚠️  Image {i}: translations hors bornes")
+            print(f"     tvec: {tvec_flat}, bornes: [{bounds_lower[pose_idx+3]:.2f}, {bounds_upper[pose_idx+3]:.2f}]")
+            bounds_adjusted = True
+            # Ajuster les bornes pour cette image si nécessaire
+            for j in range(3):
+                if tvec_flat[j] < bounds_lower[pose_idx+3+j]:
+                    bounds_lower[pose_idx+3+j] = tvec_flat[j] * 1.1  # 10% de marge
+                if tvec_flat[j] > bounds_upper[pose_idx+3+j]:
+                    bounds_upper[pose_idx+3+j] = tvec_flat[j] * 1.1
+    
+    if bounds_adjusted:
+        print(f"  ✓ Bornes ajustées automatiquement pour inclure toutes les valeurs initiales")
+    
+    # Reconstruire les bornes finales
+    bounds = (bounds_lower, bounds_upper)
+    
+    # Vérification finale : s'assurer que toutes les valeurs initiales sont dans les bornes
+    print(f"  Vérification finale des bornes...")
+    max_iterations = 3
+    for iteration in range(max_iterations):
+        all_in_bounds = True
+        for i, val in enumerate(params_init):
+            if val < bounds_lower[i] or val > bounds_upper[i]:
+                all_in_bounds = False
+                # Ajuster les bornes pour inclure la valeur avec une marge
+                margin = abs(val) * 0.1 if abs(val) > 1e-6 else 0.1
+                if val < bounds_lower[i]:
+                    bounds_lower[i] = val - margin
+                if val > bounds_upper[i]:
+                    bounds_upper[i] = val + margin
+        
+        if all_in_bounds:
+            print(f"  ✓ Toutes les valeurs initiales sont dans les bornes (itération {iteration + 1})")
+            break
+        elif iteration < max_iterations - 1:
+            print(f"  ⚠️  Ajustement des bornes (itération {iteration + 1}/{max_iterations})...")
+            # Reconstruire les bornes
+            bounds = (bounds_lower, bounds_upper)
+        else:
+            # Dernière itération : forcer les bornes à inclure toutes les valeurs
+            print(f"  ⚠️  Ajustement final forcé des bornes...")
+            for i, val in enumerate(params_init):
+                if val < bounds_lower[i]:
+                    bounds_lower[i] = val - abs(val) * 0.01
+                if val > bounds_upper[i]:
+                    bounds_upper[i] = val + abs(val) * 0.01
+            bounds = (bounds_lower, bounds_upper)
+            # Vérification finale
+            all_in_bounds = True
+            for i, val in enumerate(params_init):
+                if val < bounds_lower[i] or val > bounds_upper[i]:
+                    print(f"  ❌ ERREUR CRITIQUE: Paramètre {i} toujours hors bornes: {val:.6f} (bornes: [{bounds_lower[i]:.6f}, {bounds_upper[i]:.6f}])")
+                    all_in_bounds = False
+                    # Forcer absolument les bornes
+                    bounds_lower[i] = min(bounds_lower[i], val - 1e-6)
+                    bounds_upper[i] = max(bounds_upper[i], val + 1e-6)
+            bounds = (bounds_lower, bounds_upper)
+    
+    if not all_in_bounds:
+        raise ValueError("Impossible de définir des bornes valides pour toutes les valeurs initiales!")
     
     # Optimisation
     print("\n6. Optimisation non-linéaire (cela peut prendre du temps)...")
@@ -359,6 +470,21 @@ def optimize_calibration(calibration_json, images_folder, square_size_cm,
     print(f"  Radiaux: k1={k1_opt:.6e}, k2={k2_opt:.6e}, k3={k3_opt:.6e}")
     print(f"  Tangentiels: p1={p1_opt:.6e}, p2={p2_opt:.6e}")
     
+    # Extraire les poses optimisées
+    n_intrinsic = 11
+    n_pose_params = 6
+    rvecs_opt = []
+    tvecs_opt = []
+    
+    for i in range(n_images):
+        pose_idx = n_intrinsic + i * n_pose_params
+        rvec_opt = params_opt[pose_idx:pose_idx+3]
+        tvec_opt = params_opt[pose_idx+3:pose_idx+6]
+        rvecs_opt.append(rvec_opt.tolist())
+        tvecs_opt.append(tvec_opt.tolist())
+    
+    print(f"\nPoses optimisées: {len(rvecs_opt)} images")
+    
     # Préparer les résultats
     optimized_results = {
         'success': result.success,
@@ -374,6 +500,9 @@ def optimize_calibration(calibration_json, images_folder, square_size_cm,
         'initial_reprojection_error': initial_results['reprojection_error'],
         'improvement_percent': improvement,
         'valid_images': len(valid_images),
+        'valid_image_paths': valid_images,
+        'rvecs': rvecs_opt,  # Poses optimisées (rotations)
+        'tvecs': tvecs_opt,  # Poses optimisées (translations)
         'calibration_model': 'optimized_separate_pp_cdist'
     }
     
