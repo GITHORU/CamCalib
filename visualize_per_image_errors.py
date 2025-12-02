@@ -28,6 +28,68 @@ def detect_charuco_corners(image_path, board):
     return image, charuco_corners, charuco_ids
 
 
+def project_points_with_cdist(obj_points, rvec, tvec, camera_matrix, dist_coeffs, distortion_center=None):
+    """
+    Projette les points 3D avec support de PP ≠ CDist
+    
+    Args:
+        obj_points: Points 3D (N, 3)
+        rvec: Vecteur de rotation (3,)
+        tvec: Vecteur de translation (3,)
+        camera_matrix: Matrice caméra [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
+        dist_coeffs: Coefficients de distorsion [k1, k2, p1, p2, k3]
+        distortion_center: [cx_dist, cy_dist] ou None (utilise PP si None)
+    
+    Returns:
+        Points projetés (N, 2)
+    """
+    fx = camera_matrix[0, 0]
+    fy = camera_matrix[1, 1]
+    cx = camera_matrix[0, 2]
+    cy = camera_matrix[1, 2]
+    
+    # Si pas de CDist spécifié, utiliser PP (comportement standard OpenCV)
+    if distortion_center is None:
+        return cv2.projectPoints(obj_points, rvec, tvec, camera_matrix, dist_coeffs)[0].reshape(-1, 2)
+    
+    cx_dist, cy_dist = distortion_center
+    
+    # Extraire les coefficients de distorsion
+    k1 = dist_coeffs[0] if len(dist_coeffs) > 0 else 0.0
+    k2 = dist_coeffs[1] if len(dist_coeffs) > 1 else 0.0
+    k3 = dist_coeffs[4] if len(dist_coeffs) > 4 else 0.0
+    p1 = dist_coeffs[2] if len(dist_coeffs) > 2 else 0.0
+    p2 = dist_coeffs[3] if len(dist_coeffs) > 3 else 0.0
+    
+    # Rotation et translation
+    R, _ = cv2.Rodrigues(rvec)
+    obj_points_rot = (R @ obj_points.T).T + tvec
+    
+    # Projection perspective avec PP
+    x_proj = fx * obj_points_rot[:, 0] / obj_points_rot[:, 2] + cx
+    y_proj = fy * obj_points_rot[:, 1] / obj_points_rot[:, 2] + cy
+    
+    # Normaliser par rapport à CDist (pas PP!)
+    x_norm = (x_proj - cx_dist) / fx
+    y_norm = (y_proj - cy_dist) / fy
+    
+    # Calculer r²
+    r_squared = x_norm**2 + y_norm**2
+    
+    # Distorsion radiale
+    radial = 1 + k1 * r_squared + k2 * r_squared**2 + k3 * r_squared**3
+    
+    # Distorsion tangentielle
+    x_dist = x_norm * radial + 2 * p1 * x_norm * y_norm + p2 * (r_squared + 2 * x_norm**2)
+    y_dist = y_norm * radial + 2 * p2 * x_norm * y_norm + p1 * (r_squared + 2 * y_norm**2)
+    
+    # Remettre dans le système image avec CDist
+    x_final = x_dist * fx + cx_dist
+    y_final = y_dist * fy + cy_dist
+    
+    return np.column_stack([x_final, y_final])
+
+
 def visualize_image_errors(calibration_json, images_folder, square_size_cm,
                            squares_x=11, squares_y=8, marker_ratio=0.7,
                            output_folder=None, max_images=None, image_list=None,
@@ -55,6 +117,11 @@ def visualize_image_errors(calibration_json, images_folder, square_size_cm,
     
     # Obtenir la taille de l'image
     image_size = tuple(calib_data['image_size'])
+    
+    # Lire distortion_center si disponible (PP ≠ CDist), sinon utiliser PP
+    distortion_center = calib_data.get('distortion_center', None)
+    if distortion_center is None:
+        distortion_center = calib_data['principal_point']  # Fallback sur PP
     
     # Créer la planche ChArUco
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
@@ -251,14 +318,15 @@ def visualize_image_errors(calibration_json, images_folder, square_size_cm,
         obj_pts = np.array(obj_pts, dtype=np.float32)
         
         # Projeter les points 3D sur l'image
-        projected_points, _ = cv2.projectPoints(
+        # Utilise distortion_center si disponible (PP ≠ CDist)
+        projected_points = project_points_with_cdist(
             obj_pts,
             rvec,
             tvec,
             camera_matrix,
-            dist_coeffs
+            dist_coeffs,
+            distortion_center
         )
-        projected_points = projected_points.reshape(-1, 2)
         
         # Calculer les erreurs de reprojection
         errors = np.linalg.norm(corners_flat - projected_points, axis=1)

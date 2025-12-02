@@ -141,6 +141,7 @@ def calibrate_camera(images_folder, square_size_cm, squares_x=11, squares_y=8, m
         'image_size': image_size,
         'focal_length': [float(fx), float(fy)],
         'principal_point': [float(cx), float(cy)],
+        'distortion_center': [float(cx), float(cy)],  # PP = CDist pour calibration standard
         'reprojection_error': float(retval),
         'valid_images': len(valid_images),
         'total_images': len(image_files),

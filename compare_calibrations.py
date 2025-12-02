@@ -31,12 +31,18 @@ def load_calibration(json_path):
     
     image_size = tuple(calib['image_size'])
     
+    # Lire distortion_center si disponible (PP ≠ CDist)
+    distortion_center = calib.get('distortion_center', None)
+    if distortion_center is None:
+        distortion_center = calib.get('principal_point', [camera_matrix[0,2], camera_matrix[1,2]])
+    
     return {
         'camera_matrix': camera_matrix,
         'distortion_coefficients': dist_coeffs,
         'image_size': image_size,
         'focal_length': calib.get('focal_length', [camera_matrix[0,0], camera_matrix[1,1]]),
-        'principal_point': calib.get('principal_point', [camera_matrix[0,2], camera_matrix[1,2]])
+        'principal_point': calib.get('principal_point', [camera_matrix[0,2], camera_matrix[1,2]]),
+        'distortion_center': distortion_center
     }
 
 
@@ -83,9 +89,72 @@ def create_grid_3d_points(image_size, camera_matrix, grid_spacing=100, distance=
     return points_3d, points_2d
 
 
-def project_points(points_3d, camera_matrix, dist_coeffs):
+def project_points_with_cdist(obj_points, rvec, tvec, camera_matrix, dist_coeffs, distortion_center=None):
+    """
+    Projette les points 3D avec support de PP ≠ CDist
+    
+    Args:
+        obj_points: Points 3D (N, 3)
+        rvec: Vecteur de rotation (3,)
+        tvec: Vecteur de translation (3,)
+        camera_matrix: Matrice caméra [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
+        dist_coeffs: Coefficients de distorsion [k1, k2, p1, p2, k3]
+        distortion_center: [cx_dist, cy_dist] ou None (utilise PP si None)
+    
+    Returns:
+        Points projetés (N, 2)
+    """
+    fx = camera_matrix[0, 0]
+    fy = camera_matrix[1, 1]
+    cx = camera_matrix[0, 2]
+    cy = camera_matrix[1, 2]
+    
+    # Si pas de CDist spécifié, utiliser PP (comportement standard OpenCV)
+    if distortion_center is None:
+        return cv2.projectPoints(obj_points, rvec, tvec, camera_matrix, dist_coeffs)[0].reshape(-1, 2)
+    
+    cx_dist, cy_dist = distortion_center
+    
+    # Extraire les coefficients de distorsion
+    k1 = dist_coeffs[0] if len(dist_coeffs) > 0 else 0.0
+    k2 = dist_coeffs[1] if len(dist_coeffs) > 1 else 0.0
+    k3 = dist_coeffs[4] if len(dist_coeffs) > 4 else 0.0
+    p1 = dist_coeffs[2] if len(dist_coeffs) > 2 else 0.0
+    p2 = dist_coeffs[3] if len(dist_coeffs) > 3 else 0.0
+    
+    # Rotation et translation
+    R, _ = cv2.Rodrigues(rvec)
+    obj_points_rot = (R @ obj_points.T).T + tvec
+    
+    # Projection perspective avec PP
+    x_proj = fx * obj_points_rot[:, 0] / obj_points_rot[:, 2] + cx
+    y_proj = fy * obj_points_rot[:, 1] / obj_points_rot[:, 2] + cy
+    
+    # Normaliser par rapport à CDist (pas PP!)
+    x_norm = (x_proj - cx_dist) / fx
+    y_norm = (y_proj - cy_dist) / fy
+    
+    # Calculer r²
+    r_squared = x_norm**2 + y_norm**2
+    
+    # Distorsion radiale
+    radial = 1 + k1 * r_squared + k2 * r_squared**2 + k3 * r_squared**3
+    
+    # Distorsion tangentielle
+    x_dist = x_norm * radial + 2 * p1 * x_norm * y_norm + p2 * (r_squared + 2 * x_norm**2)
+    y_dist = y_norm * radial + 2 * p2 * x_norm * y_norm + p1 * (r_squared + 2 * y_norm**2)
+    
+    # Remettre dans le système image avec CDist
+    x_final = x_dist * fx + cx_dist
+    y_final = y_dist * fy + cy_dist
+    
+    return np.column_stack([x_final, y_final])
+
+
+def project_points(points_3d, camera_matrix, dist_coeffs, distortion_center=None):
     """
     Projette des points 3D sur le plan image avec distorsion.
+    Supporte PP ≠ CDist si distortion_center est fourni.
     
     Returns:
         points_2d: Array (N, 2) de points projetés
@@ -94,16 +163,10 @@ def project_points(points_3d, camera_matrix, dist_coeffs):
     rvec = np.zeros(3)
     tvec = np.zeros(3)
     
-    # Projection avec distorsion
-    points_2d, _ = cv2.projectPoints(
-        points_3d.reshape(-1, 1, 3),
-        rvec,
-        tvec,
-        camera_matrix,
-        dist_coeffs
+    # Utiliser la fonction personnalisée pour PP ≠ CDist
+    return project_points_with_cdist(
+        points_3d, rvec, tvec, camera_matrix, dist_coeffs, distortion_center
     )
-    
-    return points_2d.reshape(-1, 2)
 
 
 def compare_calibrations(calib1_path, calib2_path, grid_spacing=100, 
@@ -151,11 +214,13 @@ def compare_calibrations(calib1_path, calib2_path, grid_spacing=100,
     # Projeter avec les deux calibrations
     print("\nProjection avec calibration 1...")
     proj1 = project_points(points_3d, calib1['camera_matrix'], 
-                           calib1['distortion_coefficients'])
+                           calib1['distortion_coefficients'],
+                           calib1.get('distortion_center'))
     
     print("Projection avec calibration 2...")
     proj2 = project_points(points_3d, calib2['camera_matrix'], 
-                           calib2['distortion_coefficients'])
+                           calib2['distortion_coefficients'],
+                           calib2.get('distortion_center'))
     
     # Calculer les différences (vecteurs)
     diff_vectors = proj2 - proj1
