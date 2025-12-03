@@ -9,6 +9,9 @@ import numpy as np
 import json
 import argparse
 import xml.etree.ElementTree as ET
+import subprocess
+import re
+import shutil
 from pathlib import Path
 
 
@@ -220,6 +223,113 @@ def export_micmac(results, output_path):
     print(f"✓ Format MicMac exporté: {output_path}")
 
 
+def prepare_micmac_figee(calibration_xml, images_folder, output_dir="Ori-Calib", focal_mm=None):
+    """
+    Prépare la structure Ori-Calib/ pour utiliser une calibration avec Tapas Figee
+    
+    Args:
+        calibration_xml: Chemin vers le fichier XML de calibration MicMac
+        images_folder: Dossier contenant les images pour lire les EXIF
+        output_dir: Nom du répertoire de sortie (défaut: Ori-Calib)
+        focal_mm: Focale en mm (optionnel, sera détectée depuis EXIF si non fournie)
+    
+    Returns:
+        Chemin vers le fichier de calibration créé
+    """
+    calibration_xml = Path(calibration_xml)
+    images_folder = Path(images_folder)
+    output_dir = Path(output_dir)
+    
+    if not calibration_xml.exists():
+        raise FileNotFoundError(f"Fichier de calibration introuvable: {calibration_xml}")
+    
+    # Détecter la focale depuis les EXIF si non fournie
+    if focal_mm is None:
+        print(f"\nLecture de la focale depuis les EXIF des images dans {images_folder}...")
+        
+        # Essayer avec exiftool d'abord (plus fiable)
+        try:
+            # Chercher une image dans le dossier
+            image_extensions = ['.tiff', '.tif', '.jpg', '.jpeg', '.png']
+            image_files = []
+            for ext in image_extensions:
+                image_files.extend(list(images_folder.glob(f'*{ext}')))
+                image_files.extend(list(images_folder.glob(f'*{ext.upper()}')))
+            
+            if image_files:
+                # Essayer avec exiftool sur la première image
+                result = subprocess.run(
+                    ['exiftool', '-FocalLength', '-q', '-q', str(image_files[0])],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode == 0 and result.stdout:
+                    # Parser la sortie: "Focal Length : 28.0 mm"
+                    match = re.search(r'Focal Length\s*:\s*([\d.]+)', result.stdout)
+                    if match:
+                        focal_mm = float(match.group(1))
+                        print(f"  ✓ Focale détectée (exiftool): {focal_mm} mm")
+        except (subprocess.TimeoutExpired, FileNotFoundError, ValueError, IndexError):
+            pass
+        
+        # Si exiftool n'a pas fonctionné, essayer avec PIL/Pillow
+        if focal_mm is None:
+            try:
+                from PIL import Image
+                from PIL.ExifTags import TAGS
+                
+                if image_files:
+                    img = Image.open(image_files[0])
+                    exif = img.getexif()
+                    
+                    # Chercher la focale dans les EXIF
+                    for tag_id, value in exif.items():
+                        tag = TAGS.get(tag_id, tag_id)
+                        if tag == 'FocalLength':
+                            focal_mm = float(value)
+                            print(f"  ✓ Focale détectée (PIL): {focal_mm} mm")
+                            break
+            except (ImportError, AttributeError, ValueError, KeyError, IndexError):
+                pass
+        
+        # Si toujours pas de focale, demander à l'utilisateur
+        if focal_mm is None:
+            print("  ⚠️  Impossible de détecter la focale automatiquement.")
+            print("     Utilisez l'option --focal-mm pour la spécifier manuellement.")
+            raise ValueError("Focale non détectée. Utilisez --focal-mm pour la spécifier manuellement.")
+    
+    # Calculer le nom du fichier (focale * 10)
+    focal_code = int(round(focal_mm * 10))
+    output_filename = f"AutoCal{focal_code}.xml"
+    
+    # Créer le répertoire de sortie
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Copier le fichier avec le bon nom
+    output_path = output_dir / output_filename
+    shutil.copy2(calibration_xml, output_path)
+    
+    print(f"\n✓ Structure MicMac créée:")
+    print(f"  Répertoire: {output_dir}/")
+    print(f"  Fichier: {output_filename}")
+    print(f"  Focale utilisée: {focal_mm} mm (code: {focal_code})")
+    print(f"\n  Utilisation avec Tapas:")
+    print(f"  mm3d Tapas Figee \"pattern\" Out=Sortie InCal={output_dir}/")
+    
+    return str(output_path)
+
+
+def prepare_existing_calibration_for_figee(calibration_xml, images_folder, output_dir="Ori-Calib", focal_mm=None):
+    """
+    Prépare la structure Ori-Calib/ pour un fichier de calibration existant
+    
+    Usage en ligne de commande:
+        python camera_calibrator.py --prepare-existing calibration.xml images_folder
+    """
+    return prepare_micmac_figee(calibration_xml, images_folder, output_dir, focal_mm)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Calibration de caméra ChArUco')
     parser.add_argument('images_folder', help='Dossier contenant les images')
@@ -235,8 +345,26 @@ def main():
                        help='Fichier de sortie JSON (défaut: calibration.json)')
     parser.add_argument('--export-micmac', action='store_true',
                        help='Exporter également au format MicMac XML')
+    parser.add_argument('--prepare-figee', action='store_true',
+                       help='Préparer la structure Ori-Calib/ pour Tapas Figee (nécessite --export-micmac)')
+    parser.add_argument('--prepare-existing', type=str, default=None,
+                       help='Préparer une calibration XML existante pour Figee (chemin vers le XML)')
+    parser.add_argument('--focal-mm', type=float, default=None,
+                       help='Focale en mm (détectée depuis EXIF si non fournie)')
+    parser.add_argument('--figee-dir', default='Ori-Calib',
+                       help='Nom du répertoire pour Figee (défaut: Ori-Calib)')
     
     args = parser.parse_args()
+    
+    # Si on veut juste préparer une calibration existante
+    if args.prepare_existing:
+        prepare_existing_calibration_for_figee(
+            args.prepare_existing,
+            args.images_folder,
+            output_dir=args.figee_dir,
+            focal_mm=args.focal_mm
+        )
+        return
     
     # Calibration
     results = calibrate_camera(
@@ -254,9 +382,27 @@ def main():
     print(f"\n✓ Résultats sauvegardés: {args.output}")
     
     # Export MicMac si demandé
+    micmac_path = None
     if args.export_micmac:
         micmac_path = args.output.replace('.json', '_micmac.xml')
         export_micmac(results, micmac_path)
+    
+    # Préparer la structure Figee si demandé
+    if args.prepare_figee:
+        if not args.export_micmac:
+            print("\n⚠️  --prepare-figee nécessite --export-micmac")
+            print("   Utilisation de --export-micmac automatiquement...")
+            if micmac_path is None:
+                micmac_path = args.output.replace('.json', '_micmac.xml')
+                export_micmac(results, micmac_path)
+        
+        if micmac_path:
+            prepare_micmac_figee(
+                micmac_path,
+                args.images_folder,
+                output_dir=args.figee_dir,
+                focal_mm=args.focal_mm
+            )
 
 
 if __name__ == "__main__":

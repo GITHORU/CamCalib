@@ -521,6 +521,12 @@ def main():
     parser.add_argument('--marker-ratio', type=float, default=0.7, help='Ratio marqueur/carré')
     parser.add_argument('--output', default='calibration_optimized.json', 
                        help='Fichier de sortie JSON')
+    parser.add_argument('--prepare-figee', action='store_true',
+                       help='Préparer la structure Ori-Calib/ pour Tapas Figee')
+    parser.add_argument('--focal-mm', type=float, default=None,
+                       help='Focale en mm (détectée depuis EXIF si non fournie)')
+    parser.add_argument('--figee-dir', default='Ori-Calib',
+                       help='Nom du répertoire pour Figee (défaut: Ori-Calib)')
     
     args = parser.parse_args()
     
@@ -545,13 +551,42 @@ def main():
     print(f"\n✅ Résultats sauvegardés: {args.output}")
     
     # Export MicMac si possible
+    micmac_path = None
     try:
-        from camera_calibrator import export_micmac
+        from camera_calibrator import export_micmac, prepare_micmac_figee
         base_name = args.output.replace('.json', '')
-        export_micmac(results, f"{base_name}_micmac.xml")
-        print(f"✅ Format MicMac exporté: {base_name}_micmac.xml")
+        micmac_path = f"{base_name}_micmac.xml"
+        export_micmac(results, micmac_path)
+        print(f"✅ Format MicMac exporté: {micmac_path}")
     except Exception as e:
         print(f"⚠️  Export MicMac échoué: {e}")
+    
+    # Préparer la structure Figee si demandé
+    if args.prepare_figee:
+        if micmac_path is None:
+            print("\n⚠️  --prepare-figee nécessite un export MicMac réussi")
+            print("   Tentative d'export MicMac...")
+            try:
+                from camera_calibrator import export_micmac
+                base_name = args.output.replace('.json', '')
+                micmac_path = f"{base_name}_micmac.xml"
+                export_micmac(results, micmac_path)
+                print(f"✅ Format MicMac exporté: {micmac_path}")
+            except Exception as e:
+                print(f"❌ Export MicMac échoué: {e}")
+                print("   Impossible de préparer la structure Figee")
+                return
+        
+        if micmac_path:
+            try:
+                prepare_micmac_figee(
+                    micmac_path,
+                    args.images_folder,
+                    output_dir=args.figee_dir,
+                    focal_mm=args.focal_mm
+                )
+            except Exception as e:
+                print(f"⚠️  Préparation Figee échouée: {e}")
 
 
 if __name__ == "__main__":
