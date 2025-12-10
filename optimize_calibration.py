@@ -19,9 +19,16 @@ def load_calibration_results(json_path):
     return results
 
 
-def load_charuco_data(images_folder, board, square_size_cm):
-    """Charge toutes les données ChArUco détectées"""
-    from camera_calibrator import detect_charuco_corners
+def load_charuco_data(images_folder, board, square_size_cm, border_margin=0):
+    """Charge toutes les données ChArUco détectées
+    
+    Args:
+        images_folder: Dossier contenant les images
+        board: Objet CharucoBoard
+        square_size_cm: Taille des carrés en cm (pour compatibilité)
+        border_margin: Nombre de rangées/colonnes à exclure du bord (défaut: 0)
+    """
+    from camera_calibrator import detect_charuco_corners, filter_border_corners
     
     image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
     image_files = []
@@ -34,10 +41,21 @@ def load_charuco_data(images_folder, board, square_size_cm):
     all_obj_points = []
     valid_images = []
     obj_points = board.getChessboardCorners()
+    total_corners_before = 0
+    total_corners_after = 0
     
     for image_path in image_files:
         corners, ids = detect_charuco_corners(str(image_path), board)
         if corners is not None and ids is not None:
+            n_before = len(ids)
+            total_corners_before += n_before
+            
+            # Filtrer les coins du bord si demandé
+            if border_margin > 0:
+                corners, ids = filter_border_corners(corners, ids, board, border_margin)
+            
+            n_after = len(ids)
+            total_corners_after += n_after
             # Convertir en points 3D et 2D
             obj_pts = []
             img_pts = []
@@ -71,6 +89,10 @@ def load_charuco_data(images_folder, board, square_size_cm):
                 all_ids.append(np.array(valid_ids, dtype=np.int32))
                 all_obj_points.append(np.array(obj_pts, dtype=np.float32))
                 valid_images.append(str(image_path))
+    
+    if border_margin > 0 and total_corners_before > 0:
+        reduction_pct = 100 * (1 - total_corners_after / total_corners_before)
+        print(f"  Filtrage bord: {total_corners_before} → {total_corners_after} coins ({reduction_pct:.1f}% exclus)")
     
     return all_corners, all_ids, all_obj_points, valid_images
 
@@ -173,7 +195,7 @@ def compute_reprojection_error(params, all_obj_points, all_img_points, image_siz
 
 
 def optimize_calibration(calibration_json, images_folder, square_size_cm, 
-                       squares_x=11, squares_y=8, marker_ratio=0.7):
+                       squares_x=11, squares_y=8, marker_ratio=0.7, border_margin=0):
     """
     Optimise la calibration avec PP et CDist séparés
     
@@ -183,10 +205,13 @@ def optimize_calibration(calibration_json, images_folder, square_size_cm,
         square_size_cm: Taille des carrés en cm
         squares_x, squares_y: Dimensions de la planche
         marker_ratio: Ratio marqueur/carré
+        border_margin: Nombre de rangées/colonnes à exclure du bord (défaut: 0)
     """
     print("=== OPTIMISATION CALIBRATION AVANCEE ===")
     print(f"Calibration initiale: {calibration_json}")
     print(f"Dossier images: {images_folder}")
+    if border_margin > 0:
+        print(f"Filtrage bord: {border_margin} rangée(s)/colonne(s) exclue(s)")
     print("=" * 50)
     
     # Charger la calibration initiale
@@ -223,13 +248,18 @@ def optimize_calibration(calibration_json, images_folder, square_size_cm,
     
     # Créer la planche ChArUco
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
-    board = cv2.aruco.CharucoBoard((squares_x, squares_y), square_size_cm, 
-                                   square_size_cm * marker_ratio, aruco_dict)
+    
+    # Convertir cm en mètres (OpenCV attend les dimensions en mètres)
+    square_size_m = square_size_cm / 100.0
+    marker_size_m = square_size_m * marker_ratio
+    
+    board = cv2.aruco.CharucoBoard((squares_x, squares_y), square_size_m, 
+                                   marker_size_m, aruco_dict)
     
     # Charger les données ChArUco
     print("\n2. Chargement des données ChArUco...")
     all_corners, all_ids, all_obj_points, valid_images = load_charuco_data(
-        images_folder, board, square_size_cm
+        images_folder, board, square_size_cm, border_margin
     )
     print(f"  Images valides: {len(valid_images)}")
     
@@ -527,6 +557,8 @@ def main():
                        help='Focale en mm (détectée depuis EXIF si non fournie)')
     parser.add_argument('--figee-dir', default='Ori-Calib',
                        help='Nom du répertoire pour Figee (défaut: Ori-Calib)')
+    parser.add_argument('--border-margin', type=int, default=0,
+                       help='Nombre de rangées/colonnes à exclure du bord (défaut: 0 = pas de filtre)')
     
     args = parser.parse_args()
     
@@ -537,7 +569,8 @@ def main():
         args.square_size,
         args.squares_x,
         args.squares_y,
-        args.marker_ratio
+        args.marker_ratio,
+        args.border_margin
     )
     
     if not results['success']:

@@ -31,22 +31,91 @@ def detect_charuco_corners(image_path, board):
     return charuco_corners, charuco_ids
 
 
-def calibrate_camera(images_folder, square_size_cm, squares_x=11, squares_y=8, marker_ratio=0.7):
-    """Calibre une caméra à partir d'images de planches ChArUco"""
+def filter_border_corners(corners, ids, board, border_margin=0):
+    """
+    Filtre les coins du bord du damier ChArUco
+    
+    Args:
+        corners: Coins détectés (N, 2) ou (N, 1, 2)
+        ids: IDs des coins (N,) ou (N, 1)
+        board: Objet CharucoBoard
+        border_margin: Nombre de rangées/colonnes à exclure du bord (défaut: 0 = pas de filtre)
+    
+    Returns:
+        corners_filtered, ids_filtered: Coins et IDs filtrés (même format que l'entrée)
+    """
+    if border_margin == 0:
+        return corners, ids
+    
+    squares_x, squares_y = board.getChessboardSize()
+    
+    # Normaliser les formats d'entrée
+    ids_flat = ids.flatten() if isinstance(ids, np.ndarray) else np.array(ids).flatten()
+    
+    # Créer le masque de validation
+    valid_mask = []
+    for corner_id in ids_flat:
+        # ID = y * squares_x + x dans ChArUco
+        y = corner_id // squares_x
+        x = corner_id % squares_x
+        
+        # Garder seulement si pas sur le bord
+        if (border_margin <= x < squares_x - border_margin and 
+            border_margin <= y < squares_y - border_margin):
+            valid_mask.append(True)
+        else:
+            valid_mask.append(False)
+    
+    valid_mask = np.array(valid_mask)
+    
+    # Filtrer les IDs
+    ids_filtered = ids[valid_mask]
+    
+    # Filtrer les corners (gérer différents formats)
+    if len(corners.shape) == 2:
+        # Format (N, 2)
+        corners_filtered = corners[valid_mask]
+    elif len(corners.shape) == 3:
+        # Format (N, 1, 2)
+        corners_filtered = corners[valid_mask]
+    else:
+        corners_filtered = corners[valid_mask]
+    
+    return corners_filtered, ids_filtered
+
+
+def calibrate_camera(images_folder, square_size_cm, squares_x=11, squares_y=8, marker_ratio=0.7, border_margin=0):
+    """Calibre une caméra à partir d'images de planches ChArUco
+    
+    Args:
+        images_folder: Dossier contenant les images
+        square_size_cm: Taille des carrés en cm
+        squares_x: Nombre de carrés en X (défaut: 11)
+        squares_y: Nombre de carrés en Y (défaut: 8)
+        marker_ratio: Ratio taille marqueur/carré (défaut: 0.7)
+        border_margin: Nombre de rangées/colonnes à exclure du bord (défaut: 0)
+    """
     
     print(f"=== CALIBRATION DE CAMERA ===")
     print(f"Dossier: {images_folder}")
     print(f"Taille carrés: {square_size_cm} cm")
     print(f"Configuration: {squares_x}x{squares_y}")
     print(f"Ratio marqueur: {marker_ratio}")
+    if border_margin > 0:
+        print(f"Filtrage bord: {border_margin} rangée(s)/colonne(s) exclue(s)")
     print("=" * 40)
     
     # Créer la planche ChArUco
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+    
+    # Convertir cm en mètres (OpenCV attend les dimensions en mètres)
+    square_size_m = square_size_cm / 100.0
+    marker_size_m = square_size_m * marker_ratio
+    
     board = cv2.aruco.CharucoBoard(
         (squares_x, squares_y), 
-        square_size_cm, 
-        square_size_cm * marker_ratio, 
+        square_size_m,      # En mètres
+        marker_size_m,      # En mètres
         aruco_dict
     )
     
@@ -80,16 +149,39 @@ def calibrate_camera(images_folder, square_size_cm, squares_x=11, squares_y=8, m
     all_corners = []
     all_ids = []
     valid_images = []
+    total_corners_before = 0
+    total_corners_after = 0
     
     for image_path in image_files:
         corners, ids = detect_charuco_corners(image_path, board)
         if corners is not None and ids is not None and len(ids) >= 4:
-            all_corners.append(corners)
-            all_ids.append(ids)
-            valid_images.append(str(image_path))
-            print(f"✓ {image_path.name}: {len(ids)} coins")
+            n_before = len(ids)
+            total_corners_before += n_before
+            
+            # Filtrer les coins du bord si demandé
+            if border_margin > 0:
+                corners, ids = filter_border_corners(corners, ids, board, border_margin)
+            
+            n_after = len(ids)
+            total_corners_after += n_after
+            
+            # Vérifier qu'il reste assez de coins après filtrage
+            if n_after >= 4:
+                all_corners.append(corners)
+                all_ids.append(ids)
+                valid_images.append(str(image_path))
+                if border_margin > 0:
+                    print(f"✓ {image_path.name}: {n_before} → {n_after} coins (filtrage bord)")
+                else:
+                    print(f"✓ {image_path.name}: {n_after} coins")
+            else:
+                print(f"✗ {image_path.name}: pas assez de coins après filtrage ({n_after} < 4)")
         else:
             print(f"✗ {image_path.name}: pas de détection")
+    
+    if border_margin > 0:
+        reduction_pct = 100 * (1 - total_corners_after / total_corners_before) if total_corners_before > 0 else 0
+        print(f"\nFiltrage bord: {total_corners_before} → {total_corners_after} coins ({reduction_pct:.1f}% exclus)")
     
     print(f"\nImages valides: {len(valid_images)}/{len(image_files)}")
     
@@ -353,6 +445,8 @@ def main():
                        help='Focale en mm (détectée depuis EXIF si non fournie)')
     parser.add_argument('--figee-dir', default='Ori-Calib',
                        help='Nom du répertoire pour Figee (défaut: Ori-Calib)')
+    parser.add_argument('--border-margin', type=int, default=0,
+                       help='Nombre de rangées/colonnes à exclure du bord (défaut: 0 = pas de filtre)')
     
     args = parser.parse_args()
     
@@ -372,7 +466,8 @@ def main():
         args.square_size,
         args.squares_x,
         args.squares_y,
-        args.marker_ratio
+        args.marker_ratio,
+        args.border_margin
     )
     
     # Sauvegarde JSON

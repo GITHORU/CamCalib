@@ -44,6 +44,10 @@ def project_points_with_cdist(obj_points, rvec, tvec, camera_matrix, dist_coeffs
     Returns:
         Points projetés (N, 2)
     """
+    # S'assurer que rvec et tvec sont des vecteurs 1D (peuvent être (3,1) depuis JSON)
+    rvec = np.array(rvec).flatten()
+    tvec = np.array(tvec).flatten()
+    
     fx = camera_matrix[0, 0]
     fy = camera_matrix[1, 1]
     cx = camera_matrix[0, 2]
@@ -56,11 +60,20 @@ def project_points_with_cdist(obj_points, rvec, tvec, camera_matrix, dist_coeffs
     cx_dist, cy_dist = distortion_center
     
     # Extraire les coefficients de distorsion
-    k1 = dist_coeffs[0] if len(dist_coeffs) > 0 else 0.0
-    k2 = dist_coeffs[1] if len(dist_coeffs) > 1 else 0.0
-    k3 = dist_coeffs[4] if len(dist_coeffs) > 4 else 0.0
-    p1 = dist_coeffs[2] if len(dist_coeffs) > 2 else 0.0
-    p2 = dist_coeffs[3] if len(dist_coeffs) > 3 else 0.0
+    # dist_coeffs peut être (1, 5) ou (5,), s'assurer d'avoir un tableau 1D
+    if isinstance(dist_coeffs, np.ndarray):
+        if dist_coeffs.ndim > 1:
+            dist_coeffs_flat = dist_coeffs[0] if dist_coeffs.shape[0] == 1 else dist_coeffs.flatten()
+        else:
+            dist_coeffs_flat = dist_coeffs
+    else:
+        dist_coeffs_flat = np.array(dist_coeffs).flatten()
+    
+    k1 = float(dist_coeffs_flat[0]) if len(dist_coeffs_flat) > 0 else 0.0
+    k2 = float(dist_coeffs_flat[1]) if len(dist_coeffs_flat) > 1 else 0.0
+    k3 = float(dist_coeffs_flat[4]) if len(dist_coeffs_flat) > 4 else 0.0
+    p1 = float(dist_coeffs_flat[2]) if len(dist_coeffs_flat) > 2 else 0.0
+    p2 = float(dist_coeffs_flat[3]) if len(dist_coeffs_flat) > 3 else 0.0
     
     # Rotation et translation
     R, _ = cv2.Rodrigues(rvec)
@@ -113,7 +126,15 @@ def analyze_calibration_errors(calibration_json, images_folder, square_size_cm,
         [0.0, 0.0, 1.0]
     ])
     
-    dist_coeffs = np.array(calib_data['distortion_coefficients'][0])
+    # Extraire les coefficients de distorsion
+    dist_coeffs_raw = calib_data['distortion_coefficients']
+    dist_coeffs = np.array(dist_coeffs_raw, dtype=np.float64)
+    # Gérer le format imbriqué (peut être [[k1, k2, ...]] ou [k1, k2, ...])
+    if dist_coeffs.ndim > 1:
+        dist_coeffs = dist_coeffs[0] if dist_coeffs.shape[0] == 1 else dist_coeffs.flatten()
+    else:
+        dist_coeffs = dist_coeffs.flatten()
+    
     image_size = tuple(calib_data['image_size'])
     
     # Lire distortion_center si disponible (PP ≠ CDist), sinon utiliser PP
@@ -129,10 +150,15 @@ def analyze_calibration_errors(calibration_json, images_folder, square_size_cm,
     
     # Créer la planche ChArUco
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+    
+    # Convertir cm en mètres (OpenCV attend les dimensions en mètres)
+    square_size_m = square_size_cm / 100.0
+    marker_size_m = square_size_m * marker_ratio
+    
     board = cv2.aruco.CharucoBoard(
         (squares_x, squares_y),
-        square_size_cm,
-        square_size_cm * marker_ratio,
+        square_size_m,      # En mètres
+        marker_size_m,      # En mètres
         aruco_dict
     )
     
@@ -145,8 +171,8 @@ def analyze_calibration_errors(calibration_json, images_folder, square_size_cm,
     saved_image_paths = None
     
     if has_saved_poses:
-        saved_rvecs = [np.array(rvec) for rvec in calib_data['rvecs']]
-        saved_tvecs = [np.array(tvec) for tvec in calib_data['tvecs']]
+        saved_rvecs = [np.array(rvec).flatten() for rvec in calib_data['rvecs']]
+        saved_tvecs = [np.array(tvec).flatten() for tvec in calib_data['tvecs']]
         saved_image_paths = calib_data['valid_image_paths']
         print("✓ Utilisation des poses sauvegardées")
     
