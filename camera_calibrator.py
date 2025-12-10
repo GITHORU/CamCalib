@@ -339,55 +339,135 @@ def prepare_micmac_figee(calibration_xml, images_folder, output_dir="Ori-Calib",
     if focal_mm is None:
         print(f"\nLecture de la focale depuis les EXIF des images dans {images_folder}...")
         
-        # Essayer avec exiftool d'abord (plus fiable)
-        try:
-            # Chercher une image dans le dossier
-            image_extensions = ['.tiff', '.tif', '.jpg', '.jpeg', '.png']
-            image_files = []
-            for ext in image_extensions:
-                image_files.extend(list(images_folder.glob(f'*{ext}')))
-                image_files.extend(list(images_folder.glob(f'*{ext.upper()}')))
+        # Chercher des images dans le dossier
+        image_extensions = ['.tiff', '.tif', '.jpg', '.jpeg', '.png']
+        image_files = []
+        for ext in image_extensions:
+            image_files.extend(list(images_folder.glob(f'*{ext}')))
+            image_files.extend(list(images_folder.glob(f'*{ext.upper()}')))
+        
+        if not image_files:
+            print("  ⚠️  Aucune image trouvée dans le dossier.")
+            raise ValueError("Focale non détectée. Utilisez --focal-mm pour la spécifier manuellement.")
+        
+        def parse_focal_value(value_str):
+            """Parse une valeur de focale qui peut être un nombre ou une fraction"""
+            if isinstance(value_str, (int, float)):
+                return float(value_str)
             
-            if image_files:
-                # Essayer avec exiftool sur la première image
+            value_str = str(value_str).strip()
+            
+            # Gérer les fractions comme "120/1" ou "28/1"
+            if '/' in value_str:
+                parts = value_str.split('/')
+                if len(parts) == 2:
+                    try:
+                        num = float(parts[0].strip())
+                        den = float(parts[1].strip())
+                        if den != 0:
+                            return num / den
+                    except ValueError:
+                        pass
+            
+            # Gérer les nombres décimaux
+            try:
+                return float(value_str)
+            except ValueError:
+                return None
+        
+        # Essayer avec exiftool d'abord (plus fiable)
+        for img_file in image_files[:5]:  # Essayer jusqu'à 5 images
+            try:
+                # Essayer plusieurs tags EXIF pour la focale
+                tags_to_try = ['-FocalLength', '-FocalLengthIn35mmFormat', '-FocalLengthIn35mmFilm']
+                
+                for tag in tags_to_try:
+                    result = subprocess.run(
+                        ['exiftool', tag, '-q', '-q', str(img_file)],
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    
+                    if result.returncode == 0 and result.stdout:
+                        # Parser différentes sorties possibles:
+                        # "Focal Length : 28.0 mm"
+                        # "Focal Length : 28 mm"
+                        # "Focal Length : 120/1 mm"
+                        patterns = [
+                            r'Focal Length[^:]*:\s*([\d.]+)\s*mm',
+                            r'Focal Length[^:]*:\s*(\d+/\d+)\s*mm',
+                            r'Focal Length[^:]*:\s*([\d.]+)',
+                            r'Focal Length[^:]*:\s*(\d+/\d+)',
+                        ]
+                        
+                        for pattern in patterns:
+                            match = re.search(pattern, result.stdout, re.IGNORECASE)
+                            if match:
+                                focal_val = parse_focal_value(match.group(1))
+                                if focal_val is not None and focal_val > 0:
+                                    focal_mm = focal_val
+                                    print(f"  ✓ Focale détectée (exiftool, {img_file.name}): {focal_mm} mm")
+                                    break
+                        
+                        if focal_mm is not None:
+                            break
+                
+                if focal_mm is not None:
+                    break
+                    
+            except (subprocess.TimeoutExpired, FileNotFoundError, ValueError, IndexError) as e:
+                continue
+        
+        # Si exiftool n'a pas fonctionné, essayer avec PIL/Pillow
+        if focal_mm is None:
+            for img_file in image_files[:5]:  # Essayer jusqu'à 5 images
+                try:
+                    from PIL import Image
+                    from PIL.ExifTags import TAGS
+                    
+                    img = Image.open(img_file)
+                    exif = img.getexif()
+                    
+                    # Chercher la focale dans les EXIF
+                    focal_tags = ['FocalLength', 'FocalLengthIn35mmFilm']
+                    
+                    for tag_id, value in exif.items():
+                        tag = TAGS.get(tag_id, tag_id)
+                        if tag in focal_tags:
+                            focal_val = parse_focal_value(value)
+                            if focal_val is not None and focal_val > 0:
+                                focal_mm = focal_val
+                                print(f"  ✓ Focale détectée (PIL, {img_file.name}): {focal_mm} mm")
+                                break
+                    
+                    if focal_mm is not None:
+                        break
+                        
+                except (ImportError, AttributeError, ValueError, KeyError, IndexError, Exception) as e:
+                    continue
+        
+        # Si toujours pas de focale, afficher plus d'infos de debug
+        if focal_mm is None:
+            print("  ⚠️  Impossible de détecter la focale automatiquement.")
+            print(f"     Images testées: {len(image_files[:5])}")
+            
+            # Afficher un exemple de sortie exiftool pour debug
+            try:
                 result = subprocess.run(
-                    ['exiftool', '-FocalLength', '-q', '-q', str(image_files[0])],
+                    ['exiftool', '-FocalLength', '-FocalLengthIn35mmFormat', '-FocalLengthIn35mmFilm', 
+                     str(image_files[0])],
                     capture_output=True,
                     text=True,
                     timeout=10
                 )
-                if result.returncode == 0 and result.stdout:
-                    # Parser la sortie: "Focal Length : 28.0 mm"
-                    match = re.search(r'Focal Length\s*:\s*([\d.]+)', result.stdout)
-                    if match:
-                        focal_mm = float(match.group(1))
-                        print(f"  ✓ Focale détectée (exiftool): {focal_mm} mm")
-        except (subprocess.TimeoutExpired, FileNotFoundError, ValueError, IndexError):
-            pass
-        
-        # Si exiftool n'a pas fonctionné, essayer avec PIL/Pillow
-        if focal_mm is None:
-            try:
-                from PIL import Image
-                from PIL.ExifTags import TAGS
-                
-                if image_files:
-                    img = Image.open(image_files[0])
-                    exif = img.getexif()
-                    
-                    # Chercher la focale dans les EXIF
-                    for tag_id, value in exif.items():
-                        tag = TAGS.get(tag_id, tag_id)
-                        if tag == 'FocalLength':
-                            focal_mm = float(value)
-                            print(f"  ✓ Focale détectée (PIL): {focal_mm} mm")
-                            break
-            except (ImportError, AttributeError, ValueError, KeyError, IndexError):
+                if result.stdout:
+                    print(f"     Sortie exiftool (première image):")
+                    for line in result.stdout.strip().split('\n'):
+                        print(f"       {line}")
+            except:
                 pass
-        
-        # Si toujours pas de focale, demander à l'utilisateur
-        if focal_mm is None:
-            print("  ⚠️  Impossible de détecter la focale automatiquement.")
+            
             print("     Utilisez l'option --focal-mm pour la spécifier manuellement.")
             raise ValueError("Focale non détectée. Utilisez --focal-mm pour la spécifier manuellement.")
     
